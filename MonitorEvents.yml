@@ -1,0 +1,472 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'Send CloudWatch events to SNS.'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Delivery Notifications
+        Parameters:
+          - PublishToTopic
+          - NotificationEmail
+      - Label:
+          default: Custom Parameters
+        Parameters:
+          - CloudTrailName
+    ParameterLabels:
+      NotificationEmail:
+        default: Notification Email (optional)
+Parameters:
+  CloudTrailName:
+    Default: TenableISTrail
+    Type: String
+  PublishToTopic:
+    Type: String
+    Default: true
+    Description: Indicates notifications are published to SNS.
+    AllowedValues:
+      - true
+      - false
+  NotificationEmail:
+    Type: String
+    Default: alerts@site.com
+    Description: Email address for notifications
+Resources:
+###########################
+#Add Initial IAM Role/Policy once per account
+###########################
+  LambdaCloudWatchEventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "Lambda-Role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSCloudTrailReadOnlyAccess
+      Policies:
+        -
+          PolicyName: LambdaToSNS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: "*"
+################################
+# Deploy per region
+################################
+  CloudTrailSNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      DisplayName: 'Notification'
+      TopicName: EventNotificationTopic
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+  CloudTrailSNSTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      Topics:
+        - !Ref CloudTrailSNSTopic
+      PolicyDocument:
+        Statement:
+          - Sid: AWSCloudTrailSNSPolicy
+            Action:
+              - 'sns:Publish'
+            Effect: Allow
+            Resource: !Ref CloudTrailSNSTopic
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - cloudtrail.amazonaws.com
+  DetectAuthorizationFailuresEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: AuthorizationFailures
+      Description: Sends authorization failure events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          errorCode:
+            - "AccessDenied"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectNoMfaConsoleLoginsEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: NoMfaConsoleLogins
+      Description: Sends no MFA login change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS Console Sign In via CloudTrail
+        detail:
+          userIdentity:
+            type:
+              - IAMUser 
+          responseElements:
+            ConsoleLogin:
+              - Success
+          additionalEventData:
+            MFAUsed:
+              - "No"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectRootAccountUsageEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: RootAccount
+      Description: Sends both console and non-console root login events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS Console Sign In via CloudTrail
+        detail:
+          eventName:
+            - ConsoleLogin
+          eventType:
+            - AwsConsoleSignIn 
+            - AwsApiCall 
+          userIdentity:
+            type:
+              - Root
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectIamPolicyChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: IamPolicy
+      Description: Sends IAM policy change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+	  eventSource:
+	    - iam.amazonaws.com
+          eventName:
+            - CreateAccessKey
+            - CreateUser
+            - CreateGroup
+            - CreateRole
+            - CreateLoginProfile
+            - DeleteUser
+            - DeleteAccessKey
+            - DeleteRolePolicy
+            - DeleteUserPolicy
+            - PutGroupPolicy
+            - PutRolePolicy
+            - PutUserPolicy
+            - CreatePolicy
+            - DeletePolicy
+            - CreatePolicyVersion
+            - DeletePolicyVersion
+            - AttachRolePolicy
+            - DetachRolePolicy
+            - AttachUserPolicy
+            - DetachUserPolicy
+            - AttachGroupPolicy
+            - DetachGroupPolicy
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectCloudTrailEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: CloudTrail
+      Description: Sends CloudTrail change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - cloudtrail.amazonaws.com
+          eventName:
+            - StopLogging
+            - DeleteTrail
+            - UpdateTrail
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectConsoleSignInFailuresEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: ConsoleSignInFailuresEvents
+      Description: >-
+        Sends AWS Management Console authentication failures
+        change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS Console Sign In via CloudTrail
+        detail:
+          eventName:
+            - ConsoleLogin
+            - CheckMfa
+          errorMessage:
+            - Failed authentication
+            - No username found in supplied account
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectKMSCustomerKeyDeletionEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: KMSCustomerKey
+      Description: Sends KMS Customer Key change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - kms.amazonaws.com
+          eventName:
+            - DisableKey
+            - ScheduleKeyDeletion
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectS3BucketChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: S3Bucket
+      Description: Sends S3 bucket policy change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CreateBucket
+            - PutBucketAcl
+            - PutBucketPolicy
+            - PutBucketCors
+            - PutBucketLifecycle
+            - PutBucketReplication
+            - DeleteBucketPolicy
+            - DeleteBucketCors
+            - DeleteBucketLifecycle
+            - DeleteBucketReplication
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectAWSConfigChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: AWSConfig
+      Description: Sends AWS Config change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - config.amazonaws.com
+          eventName:
+            - PutConfigurationRecorder
+            - StopConfigurationRecorder
+            - DeleteDeliveryChannel
+            - PutDeliveryChannel
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectSecurityGroupChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: SecurityGroup
+      Description: Sends security group change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AuthorizeSecurityGroupIngress
+            - AuthorizeSecurityGroupEgress
+            - RevokeSecurityGroupIngress
+            - RevokeSecurityGroupEgress
+            - CreateSecurityGroup
+            - DeleteSecurityGroup
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectNetworkAclChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: NetworkAcl
+      Description: Sends network ACL change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - CreateNetworkAcl
+	    - CreateNetworkAclEntry
+            - DeleteNetworkAcl
+            - DeleteNetworkAclEntry
+            - ReplaceNetworkAclEntry
+            - ReplaceNetworkAclAssociation
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectNetworkGatewayChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: NetworkGateway
+      Description: Sends network gateway change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AttachInternetGateway
+            - CreateCustomerGateway
+            - CreateInternetGateway
+            - DeleteCustomerGateway
+            - DeleteInternetGateway
+            - DeleteDhcpOptions
+            - DetachInternetGateway
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectRouteTableChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: RouteTable
+      Description: Sends network change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AssociateRouteTable
+            - CreateRoute
+            - CreateRouteTable
+            - DeleteRoute
+            - DeleteRouteTable
+            - DisassociateRouteTable
+            - ReplaceRoute
+            - ReplaceRouteTableAssociation
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1    
+  DetectVPCChangesEventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: VPC
+      Description: Sends network change events to an SNS topic
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AcceptVpcPeeringConnection
+            - AttachClassicLinkVpc
+            - CreateVpc
+            - CreateVpcPeeringConnection
+            - DeleteVpc
+            - DeleteVpcPeeringConnection
+            - DetachClassicLinkVpc
+            - DisableVpcClassicLink
+            - EnableVpcClassicLink
+            - ModifyVpcAttribute
+            - RejectVpcPeeringConnection
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt FormatCloudWatchEventFunction.Arn
+          Id: TargetFunctionV1  
+
+  FormatCloudWatchEventFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: FormatCloudWatchEvent
+      Code:
+        ZipFile: !Sub |
+            import boto3
+            import json
+            SNS_TOPIC_ARN = '${CloudTrailSNSTopic}'
+            def lambda_handler(event, context):
+                response = boto3.client('sns').publish(
+                    TopicArn = SNS_TOPIC_ARN,
+                    Message = 'Please review the log details below:'+'\n\n'+ 
+                    json.dumps(event, indent=4, sort_keys=True).replace('"','').replace(',','').replace('{','').replace('}','').replace('[','').replace(']',''),
+                    Subject = 'Event - '+eventName+' ('+alias+')',
+                    MessageStructure = 'raw'
+                )
+      Description: Formats and sends a readable CloudWatch Event to an SNS topic
+      Handler: index.lambda_handler
+      MemorySize: 1024
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/Lambda-Role'
+      Runtime: python3.6
+      Timeout: 5
+  LambdaPermissionForEvents:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - FormatCloudWatchEventFunction
+    Properties:
+      FunctionName: !GetAtt FormatCloudWatchEventFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+  GetCloudTrailLogName:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetCloudTrailCloudWatchLog
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          def lambda_handler(event, context):
+            cloudwatch_log = ''
+            response_data = {}
+            if event['RequestType'] == 'Create':
+              for trail in boto3.client('cloudtrail').describe_trails(includeShadowTrails=False)['trailList']:
+                if 'CloudWatchLogsLogGroupArn' in trail:
+                  cloudwatch_log = trail['CloudWatchLogsLogGroupArn'].split(':')[6]
+                  break
+            response_data['LogName'] = cloudwatch_log
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, '')
+      Description: Function to find and return CloudWatch log name
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/Lambda-Role'
+      Runtime: python3.6
+      Timeout: 5
+  ResourceForGetCloudTrailLogName:
+    Type: Custom::ResourceForGetCloudTrailLogName
+    DependsOn: GetCloudTrailLogName
+    Properties:
+      ServiceToken: 
+        !GetAtt
+        - GetCloudTrailLogName
+        - Arn
